@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teacher AI - معلم الذكاء الاصطناعي</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Firebase (Required for Authentication, Chat, Library persistence) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, onSnapshot, collection, query, orderBy, addDoc, serverTimestamp, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Global Variables (Provided by Canvas Environment) ---
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        let app, db, auth;
+        let globalUserId = null;
+        let isAuthReady = false;
+
+        // Initialize Firebase and Auth
+        try {
+            app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+
+            // Set up authentication listener
+            onAuthStateChanged(auth, async (user) => {
+                if (user) {
+                    globalUserId = user.uid;
+                    document.getElementById('user-id-display').textContent = globalUserId;
+                    // Start data listeners once auth is ready
+                    startFirestoreListeners(globalUserId);
+                } else {
+                    // This case should ideally not happen after initial sign-in
+                    globalUserId = 'anonymous-' + crypto.randomUUID();
+                    document.getElementById('user-id-display').textContent = globalUserId;
+                    startFirestoreListeners(globalUserId);
+                }
+                isAuthReady = true;
+                // Try to load last file upon ready
+                if (window.loadLastOpenedFile) {
+                    window.loadLastOpenedFile();
+                }
+            });
+
+            // Sign in with custom token or anonymously
+            async function authenticateUser() {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            }
+            authenticateUser();
+            
+            // Expose DB instance globally for other scripts
+            window.db = db;
+            window.auth = auth;
+            window.getUserId = () => globalUserId;
+            window.isAuthReady = () => isAuthReady; 
+            window.firestoreImports = { doc, setDoc, onSnapshot, collection, query, orderBy, addDoc, serverTimestamp, getDoc, updateDoc };
+
+        } catch (error) {
+            console.error("Firebase Initialization Error:", error);
+            window.handleError(`خطأ في تهيئة قاعدة البيانات: ${error.message}`);
+        }
+    </script>
+
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Cairo:wght@400;700&display=swap');
+        :root {
+            --primary-blue: #3b82f6; /* Tailwind blue-500 */
+        }
+        body {
+            font-family: 'Cairo', sans-serif;
+            background-color: #f3f4f6; /* bg-gray-100 */
+            direction: rtl;
+            text-align: right;
+        }
+        .scroll-container::-webkit-scrollbar {
+            width: 8px;
+        }
+        .scroll-container::-webkit-scrollbar-thumb {
+            background-color: var(--primary-blue);
+            border-radius: 4px;
+        }
+        /* Custom style for active tab indicator */
+        .tab-button.active {
+            border-bottom: 3px solid var(--primary-blue);
+            color: var(--primary-blue);
+        }
+        /* Custom style to handle RTL for text alignment where needed */
+        .text-left-ar {
+            text-align: right; /* Use right for Arabic text */
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased">
+
+    <!-- Access Gate Modal -->
+    <div id="access-gate" class="fixed inset-0 bg-gray-900 bg-opacity-95 z-50 flex items-center justify-center p-4 transition-opacity duration-300">
+        <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-md text-center">
+            <h1 class="text-3xl font-bold text-gray-800 mb-6">الدخول إلى منصة المعلم الآلي</h1>
+            <p class="text-gray-600 mb-6">الرجاء إدخال مفتاح الوصول للمتابعة.</p>
+            <input type="password" id="access-key-input" placeholder="أدخل المفتاح هنا" class="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-4 focus:ring-blue-200 focus:border-blue-500 mb-4 text-left-ar">
+            <button onclick="checkAccessKey()" class="w-full bg-blue-600 hover:bg-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 shadow-md hover:shadow-lg transform hover:scale-[1.01]">
+                تأكيد الدخول
+            </button>
+            <p id="key-error-message" class="text-red-500 mt-4 hidden">المفتاح غير صحيح. يرجى المحاولة مرة أخرى.</p>
+            <p id="key-lost-message" class="text-gray-500 mt-6 text-sm hidden">
+                للحصول على المفتاح يرجى التواصل مع: <span class="font-bold text-blue-600">0908633152</span>
+            </p>
+        </div>
+    </div>
+
+    <!-- Main Application Interface (Hidden until unlocked) -->
+    <div id="main-app" class="flex flex-col flex-grow hidden">
+        <!-- Header -->
+        <header class="bg-white shadow-md p-4 sticky top-0 z-40">
+            <div class="flex items-center justify-between max-w-7xl mx-auto">
+                <h1 class="text-2xl font-extrabold text-blue-600 flex items-center">
+                    <svg class="w-6 h-6 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l9-5-9-5-9 5 9 5z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l6.16-3.422a12.083 12.083 0 01.665 6.479A11.952 11.952 0 0012 20.055z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14l-6.16-3.422a12.083 12.083 0 00-.665 6.479A11.952 11.952 0 0112 20.055z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 14L12 14"></path></svg>
+                    Teacher AI
+                </h1>
+                <div class="text-sm text-gray-500 hidden sm:block">
+                    مرحباً بك: <span id="user-id-display" class="font-mono text-xs text-blue-500">جاري التحميل...</span>
+                </div>
+                <button id="toggle-sidebar" class="md:hidden p-2 text-blue-600 rounded-lg hover:bg-blue-100 transition">
+                    <!-- Icon for Menu -->
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"></path></svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Content Area -->
+        <main class="flex flex-grow max-w-7xl mx-auto w-full">
+            <!-- Sidebar/Drawers (For Mobile, hidden by default) -->
+            <div id="sidebar" class="fixed inset-y-0 right-0 z-30 w-64 bg-white border-l border-gray-200 transform translate-x-full md:relative md:translate-x-0 md:flex md:flex-col md:w-80 p-4 space-y-4 transition-transform duration-300 md:shadow-none shadow-xl scroll-container overflow-y-auto">
+                
+                <h2 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">المكتبة الخاصة</h2>
+                <div class="space-y-2 text-sm max-h-40 overflow-y-auto scroll-container border p-2 rounded-lg bg-gray-50">
+                    <p id="library-loading" class="text-gray-500 text-center">جاري تحميل الملفات...</p>
+                    <div id="library-list" class="space-y-1">
+                        <!-- Library Items will be loaded here -->
+                    </div>
+                </div>
+
+                <h2 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">المفاهيم الأساسية</h2>
+                <div id="key-concepts-display" class="space-y-2 p-3 bg-blue-50 border border-blue-200 rounded-lg text-sm max-h-56 overflow-y-auto scroll-container">
+                    <!-- This will be populated by displayKeyConcepts -->
+                    <p class="text-gray-600">استخدم زر "استخراج القوانين والمفاهيم" لعرض النتائج هنا.</p>
+                </div>
+
+                <h2 class="text-xl font-bold text-gray-800 border-b pb-2 mb-2">الشات الجماعي للمستخدمين</h2>
+                <div id="group-chat-area" class="flex flex-col flex-grow bg-white border rounded-lg shadow-inner h-64">
+                    <div id="group-chat-messages" class="flex-grow p-3 space-y-3 overflow-y-auto scroll-container text-xs">
+                        <p class="text-center text-gray-500 pt-2">جاري تحميل الرسائل...</p>
+                        <!-- Group Chat messages will be loaded here -->
+                    </div>
+                    <div class="border-t p-2 flex">
+                        <input type="text" id="group-chat-input" placeholder="اكتب رسالتك للنقاش..." class="flex-grow px-3 py-2 border border-gray-300 rounded-r-lg focus:outline-none text-left-ar text-sm">
+                        <button onclick="sendGroupChatMessage()" class="bg-blue-600 text-white p-2 rounded-l-lg hover:bg-blue-700 transition duration-150">
+                            إرسال
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Button to trigger detailed analysis via AI Chat -->
+                <button onclick="extractConceptsToSidebar()" id="extract-concepts-button" class="mt-4 w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200 shadow-md disabled:bg-gray-400" disabled>
+                    استخراج القوانين والمفاهيم ✨
+                </button>
+
+                <button id="close-sidebar" class="md:hidden absolute top-4 left-4 text-gray-600 hover:text-gray-800">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+
+            <!-- Main Document/Chat Area -->
+            <div class="flex-grow p-4 md:p-6 bg-white shadow-xl md:shadow-none md:border-r w-full">
+                
+                <!-- Tab Navigation -->
+                <div class="flex border-b border-gray-200 mb-6">
+                    <button id="tab-doc" onclick="changeTab('document')" class="tab-button active flex-1 text-center py-3 px-4 font-semibold text-gray-600 transition duration-150">
+                        الوثيقة والمعلم الآلي
+                    </button>
+                    <button id="tab-search" onclick="changeTab('ai-search')" class="tab-button flex-1 text-center py-3 px-4 font-semibold text-gray-600 transition duration-150">
+                        البحث في المكتبة الذكية 📚
+                    </button>
+                    <button id="tab-chat" onclick="changeTab('ai-chat')" class="tab-button flex-1 text-center py-3 px-4 font-semibold text-gray-600 transition duration-150">
+                        سؤال وجواب فوري (AI)
+                    </button>
+                </div>
+
+                <!-- Document and AI Teacher Tab Content -->
+                <div id="tab-content-document" class="space-y-6">
+                    <div class="flex flex-col sm:flex-row gap-4 items-center p-4 bg-blue-50 border border-blue-200 rounded-xl">
+                        <label for="file-upload" class="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-6 rounded-full transition duration-200 shadow-lg whitespace-nowrap">
+                            رفع ملف للدراسة
+                        </label>
+                        <input type="file" id="file-upload" class="hidden" onchange="handleFileUpload(event)" accept=".pdf,.doc,.docx,.txt,image/*">
+                        <span id="file-name-display" class="text-gray-700 text-sm">لم يتم اختيار أي ملف.</span>
+                        
+                        <div class="flex flex-col sm:flex-row gap-2">
+                             <!-- Summary Button (New Feature) -->
+                            <button onclick="summarizeDocument()" id="summarize-button" class="bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 px-4 rounded-full transition duration-200 shadow-md disabled:bg-gray-400" disabled>
+                                تلخيص المحتوى ✨
+                            </button>
+
+                            <button onclick="translateAndAnalyze()" id="analyze-button" class="bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-full transition duration-200 shadow-md disabled:bg-gray-400" disabled>
+                                ترجمة فورية بالكامل
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="document-view" class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <!-- Original Content Pane -->
+                        <div class="bg-gray-50 p-4 border border-gray-200 rounded-lg shadow-inner h-[60vh] overflow-y-auto scroll-container">
+                            <h3 class="text-lg font-bold text-gray-700 border-b pb-2 mb-2">النص الأصلي (<span id="original-lang">الإنجليزية/الأصل</span>)</h3>
+                            <!-- Ensure visibility of all content -->
+                            <pre id="original-content" class="whitespace-pre-wrap text-sm text-gray-800 text-left-ar">انتظر رفع الملف...</pre>
+                        </div>
+
+                        <!-- Translated Content Pane -->
+                        <div class="bg-white p-4 border border-blue-300 rounded-lg shadow-lg h-[60vh] overflow-y-auto scroll-container relative">
+                            <h3 class="text-lg font-bold text-blue-700 border-b pb-2 mb-2">النص المُترجم كاملاً (العربية)</h3>
+                            <!-- Ensure visibility of all translated content -->
+                            <pre id="translated-content" class="whitespace-pre-wrap text-sm text-gray-800 mt-2 text-left-ar">سيتم عرض الترجمة الفورية الكاملة هنا...</pre>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- AI Search Tab Content (New Library Feature) -->
+                 <div id="tab-content-ai-search" class="hidden h-[75vh] flex flex-col">
+                    <div class="p-4 bg-gray-100 rounded-t-lg shadow-inner">
+                        <h3 class="text-xl font-bold text-gray-800 mb-3">البحث في مكتبة الكتب الذكية</h3>
+                        <div class="flex">
+                            <input type="text" id="library-search-input" placeholder="اكتب اسم الكتاب أو الموضوع الذي تبحث عنه..." class="flex-grow px-4 py-3 border border-gray-300 rounded-r-lg focus:ring-4 focus:ring-blue-200 focus:border-blue-500 text-left-ar">
+                            <button onclick="searchSmartLibrary()" id="library-search-button" class="bg-blue-600 text-white p-3 rounded-l-lg hover:bg-blue-700 transition duration-150 flex items-center">
+                                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-600 mt-2">سيقوم المعلم الآلي بالبحث عن محتوى الكتاب وإحضاره لمعالجته.</p>
+                    </div>
+                    
+                    <div id="library-search-results" class="flex-grow p-4 space-y-4 overflow-y-auto bg-white border-x border-b rounded-b-lg scroll-container">
+                        <div class="bg-yellow-50 p-4 rounded-lg border border-yellow-200">
+                            <p class="text-yellow-800 font-medium">
+                                سيتم عرض ملخص الكتاب ومحتواه المستخرج هنا. بعد ذلك، عد إلى تبويب **"الوثيقة والمعلم الآلي"** لترجمته أو تلخيصه.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Instant Q&A Chat Tab Content -->
+                <div id="tab-content-ai-chat" class="hidden h-[75vh] flex flex-col">
+                    <div id="ai-chat-messages" class="flex-grow p-4 space-y-4 overflow-y-auto bg-gray-50 border rounded-t-lg scroll-container">
+                        <!-- AI Chat messages will be loaded here -->
+                        <div class="flex justify-start">
+                            <div class="bg-blue-100 p-3 rounded-xl max-w-3/4 shadow-sm text-sm">
+                                <p class="font-bold text-blue-800">المعلم الآلي:</p>
+                                <p>مرحباً بك! أنا هنا للإجابة على أسئلتك الأكاديمية **بأقصى سرعة ممكنة**.</p>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="border-t p-4 flex bg-white rounded-b-lg shadow-md">
+                        <input type="text" id="ai-chat-input" placeholder="اكتب سؤالك الأكاديمي هنا..." class="flex-grow px-4 py-3 border border-gray-300 rounded-r-lg focus:ring-4 focus:ring-blue-200 focus:border-blue-500 text-left-ar">
+                        <button onclick="sendAIChatMessage()" id="ai-send-button" class="bg-blue-600 text-white p-3 rounded-l-lg hover:bg-blue-700 transition duration-150 flex items-center disabled:bg-gray-400">
+                            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="bg-gray-800 text-white p-4 mt-auto">
+            <div class="max-w-7xl mx-auto text-center text-sm">
+                &copy; 2024 Teacher AI. جميع الحقوق محفوظة. | تم الإنشاء بواسطة Mohamed Gafer
+            </div>
+        </footer>
+    </div>
+
+    <!-- Loading and Error Modal (Custom Modal) -->
+    <div id="modal-container" class="fixed inset-0 bg-black bg-opacity-50 z-50 items-center justify-center p-4 hidden">
+        <div id="custom-modal" class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-sm text-center transform transition-all scale-100">
+            <div id="modal-spinner" class="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4 hidden"></div>
+            <p id="modal-message" class="text-gray-700 font-medium text-lg mb-4"></p>
+            <div id="modal-buttons" class="flex justify-center space-x-4">
+                <button id="modal-retry-button" onclick="window.modalAction()" class="bg-blue-600 text-white py-2 px-4 rounded-lg hover:bg-blue-700 transition hidden">إعادة المحاولة</button>
+                <button id="modal-close-button" onclick="closeModal()" class="bg-gray-300 text-gray-800 py-2 px-4 rounded-lg hover:bg-gray-400 transition">إغلاق</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Core JavaScript Logic -->
+    <script>
+        // --- Configuration and Constants ---
+        const ACCESS_KEY = "Mohamed gafer 123bhfhjufc#";
+        
+        // IMPORTANT: API Key provided by the user
+        const API_KEY_USER = "AIzaSyDmPxYYe7ynW25hEjSP0WyhR21K8eg8LxA";
+        const apiKey = API_KEY_USER;
+        
+        // API URLs must use the new key
+        const API_URL_FLASH = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+        // Global state
+        let currentDocument = {
+            id: null,
+            name: null,
+            fileSizeMB: 0, 
+            originalText: null,
+            translatedText: null,
+            base64Data: null, 
+            mimeType: 'text/plain',
+            keyConcepts: { keywords: [], laws: [] } 
+        };
+        // History size kept small to prioritize speed and stability
+        let aiChatHistory = []; 
+
+        // --- Utility Functions ---
+
+        /** Displays a custom modal for loading, success, or error messages. */
+        function showModal(message, isError = false, showRetry = false, retryCallback = null) {
+            const container = document.getElementById('modal-container');
+            const spinner = document.getElementById('modal-spinner');
+            const messageEl = document.getElementById('modal-message');
+            const retryBtn = document.getElementById('modal-retry-button');
+            const closeBtn = document.getElementById('modal-close-button');
+
+            messageEl.textContent = message;
+            container.classList.remove('hidden');
+            container.classList.add('flex');
+            
+            if (isError) {
+                messageEl.classList.add('text-red-600');
+                spinner.classList.add('hidden');
+            } else {
+                messageEl.classList.remove('text-red-600');
+                spinner.classList.add('hidden'); 
+            }
+
+            if (showRetry && retryCallback) {
+                retryBtn.classList.remove('hidden');
+                window.modalAction = retryCallback;
+            } else {
+                retryBtn.classList.add('hidden');
+                window.modalAction = () => closeModal();
+            }
+
+            closeBtn.textContent = isError ? 'موافق' : 'إغلاق';
+        }
+
+        /** Shows a loading spinner in the modal. */
+        function showLoading(message) {
+            showModal(message, false, false);
+            document.getElementById('modal-spinner').classList.remove('hidden');
+            document.getElementById('modal-close-button').classList.add('hidden');
+        }
+
+        /** Closes the custom modal. */
+        function closeModal() {
+            document.getElementById('modal-container').classList.remove('flex');
+            document.getElementById('modal-container').classList.add('hidden');
+            document.getElementById('modal-close-button').classList.remove('hidden');
+            document.getElementById('modal-message').classList.remove('text-red-600');
+        }
+
+        /** Handles general errors gracefully. */
+        function handleError(message, callback = null) {
+            console.error("Application Error:", message);
+            showModal(`عفواً، حدث خطأ: ${message}. يرجى المحاولة مرة أخرى.`, true, !!callback, callback);
+        }
+
+        /** Generic fetch wrapper with exponential backoff. */
+        async function geminiFetch(url, payload, maxRetries = 5) {
+            for (let i = 0; i < maxRetries; i++) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        return await response.json();
+                    } else if (response.status === 429 || response.status >= 500) {
+                        const delay = Math.pow(2, i) * 500 + Math.random() * 500; 
+                        if (i < maxRetries - 1) {
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            continue;
+                        }
+                    } else if (response.status === 403) {
+                         throw new Error("403: خطأ في مفتاح الوصول (API Key). يرجى التأكد من صلاحية المفتاح.");
+                    }
+                    const errorDetail = await response.text();
+                    throw new Error(`API Error ${response.status}: ${errorDetail}`);
+                } catch (error) {
+                    if (i === maxRetries - 1) throw error;
+                    const delay = Math.pow(2, i) * 500 + Math.random() * 500;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        }
+
+        // --- Core Application Logic ---
+
+        // --- 1. Access Gate Logic ---
+        window.checkAccessKey = function() {
+            const input = document.getElementById('access-key-input');
+            const errorMsg = document.getElementById('key-error-message');
+            const lostMsg = document.getElementById('key-lost-message');
+
+            if (input.value === ACCESS_KEY) {
+                document.getElementById('access-gate').classList.add('opacity-0');
+                setTimeout(() => {
+                    document.getElementById('access-gate').classList.add('hidden');
+                    document.getElementById('main-app').classList.remove('hidden');
+                }, 300);
+            } else {
+                errorMsg.classList.remove('hidden');
+                lostMsg.classList.remove('hidden');
+                input.value = '';
+                setTimeout(() => errorMsg.classList.add('hidden'), 5000);
+            }
+        }
+
+        // --- 2. UI/Tab Management ---
+        window.changeTab = function(tabName) {
+            ['document', 'ai-search', 'ai-chat'].forEach(name => {
+                const button = document.getElementById(`tab-${name === 'document' ? 'doc' : name === 'ai-search' ? 'search' : 'chat'}`);
+                const content = document.getElementById(`tab-content-${name}`);
+                
+                if (name === tabName) {
+                    button.classList.add('active');
+                    content.classList.remove('hidden');
+                } else {
+                    button.classList.remove('active');
+                    content.classList.add('hidden');
+                }
+            });
+            
+            // Close mobile sidebar if open after tab change
+            document.getElementById('sidebar').classList.add('translate-x-full');
+        }
+
+        document.getElementById('toggle-sidebar').onclick = () => {
+            document.getElementById('sidebar').classList.toggle('translate-x-full');
+        };
+        document.getElementById('close-sidebar').onclick = () => {
+            document.getElementById('sidebar').classList.add('translate-x-full');
+        };
+
+
+        // --- 3. File Handling and Persistence (Fast Local Read) ---
+
+        /** Reads the file content, stores it in global state, and prepares for analysis. */
+        window.handleFileUpload = function(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            const fileNameDisplay = document.getElementById('file-name-display');
+            const analyzeButton = document.getElementById('analyze-button');
+            const summarizeButton = document.getElementById('summarize-button');
+            const extractConceptsButton = document.getElementById('extract-concepts-button');
+            const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2); 
+
+            // Reset state
+            currentDocument.name = file.name;
+            currentDocument.fileSizeMB = fileSizeMB;
+            currentDocument.id = Date.now().toString(); 
+            currentDocument.translatedText = null;
+            currentDocument.keyConcepts = { keywords: [], laws: [] }; 
+
+            fileNameDisplay.textContent = `تم تحميل الملف محلياً: ${file.name} (${fileSizeMB}MB). جاهز للترجمة الفورية.`;
+            analyzeButton.disabled = true;
+            summarizeButton.disabled = true;
+            extractConceptsButton.disabled = true; 
+            
+            // Determine if the file is an image/pdf or pure text
+            const isImageOrPdf = file.type.startsWith('image/') || file.type === 'application/pdf';
+
+            reader.onload = async (e) => {
+                
+                if (isImageOrPdf) {
+                    currentDocument.base64Data = e.target.result.split(',')[1];
+                    currentDocument.mimeType = file.type;
+                    
+                    // Trigger AI to convert non-text content to English text for original display
+                    await generateOriginalTextFromMultimodal(currentDocument.base64Data, currentDocument.mimeType);
+                    
+                } else {
+                    currentDocument.originalText = e.target.result;
+                    currentDocument.base64Data = null;
+                    currentDocument.mimeType = 'text/plain';
+                    document.getElementById('original-lang').textContent = 'نص/مستند';
+                }
+
+                // Show full text in original content pane
+                document.getElementById('original-content').textContent = currentDocument.originalText || 'فشل استخلاص النص الأصلي.';
+                document.getElementById('translated-content').textContent = 'اضغط على "ترجمة فورية بالكامل" أو "تلخيص المحتوى" للبدء الفوري في المعالجة...';
+                
+                // Enable buttons only after the file is read fully and stored in state
+                analyzeButton.disabled = false;
+                summarizeButton.disabled = false;
+                extractConceptsButton.disabled = false;
+                
+            };
+
+            // Read as Data URL for base64 (for images/pdf) or as text (for text files)
+            if (isImageOrPdf) {
+                reader.readAsDataURL(file);
+            } else {
+                reader.readAsText(file, 'UTF-8');
+            }
+        }
+        
+        /** Uses Gemini to convert multimodal input (image/PDF) to plain English text for display. */
+        async function generateOriginalTextFromMultimodal(base64Data, mimeType) {
+            try {
+                document.getElementById('original-lang').textContent = 'جاري استخلاص النص...';
+                
+                const payload = {
+                    contents: [{ parts: [
+                        { inlineData: { mimeType: mimeType, data: base64Data } },
+                        { text: "Extract all text present in the image/document and output it as a single block of English text. If the original language is not English, translate it to English first. Do not add any extra commentary or introductory phrases. Start directly with the extracted text." }
+                    ] }],
+                };
+
+                const response = await geminiFetch(API_URL_FLASH, payload, 3); // Max 3 retries for speed
+
+                const aiText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+                currentDocument.originalText = aiText;
+                document.getElementById('original-lang').textContent = 'الإنجليزية/الأصل';
+            } catch (error) {
+                console.error("Failed to extract original text from multimodal content:", error);
+                currentDocument.originalText = `(فشل استخلاص النص الأصلي. حاول الترجمة الفورية مباشرة)`;
+                document.getElementById('original-lang').textContent = 'خطأ/صورة';
+            }
+        }
+
+
+        /** Saves the current document data to the Firestore Library. */
+        async function saveDocumentToLibrary(docData) {
+            try {
+                if (!window.isAuthReady()) return; 
+                const { addDoc, collection, serverTimestamp } = window.firestoreImports;
+                const libraryRef = collection(window.db, `artifacts/${appId}/public/data/teacher_ai_library`);
+                
+                const libraryItem = {
+                    name: docData.name,
+                    timestamp: serverTimestamp(),
+                    userId: window.getUserId(),
+                    originalText: docData.originalText, 
+                    translatedText: docData.translatedText,
+                    keyConcepts: docData.keyConcepts || { keywords: [], laws: [] }, 
+                    mimeType: docData.mimeType,
+                    fileSizeMB: docData.fileSizeMB 
+                };
+
+                const newDocRef = await addDoc(libraryRef, libraryItem);
+                currentDocument.id = newDocRef.id;
+                await saveLastOpenedFile(newDocRef.id);
+                
+            } catch (error) {
+                console.error(`فشل حفظ الملف في المكتبة: ${error.message}`);
+            }
+        }
+
+        /** Saves the ID of the last opened file to user's private preferences. */
+        async function saveLastOpenedFile(fileId) {
+             try {
+                if (!window.isAuthReady()) return; 
+                const { doc, setDoc } = window.firestoreImports;
+                const userId = window.getUserId();
+                const prefsRef = doc(window.db, `artifacts/${appId}/users/${userId}/teacher_ai_user_data/preferences/`);
+                await setDoc(prefsRef, { lastOpenedFileId: fileId }, { merge: true });
+            } catch (error) {
+                console.error("Failed to save last opened file preference:", error);
+            }
+        }
+        
+        /** Loads the last opened file from user preferences. */
+        window.loadLastOpenedFile = async function() {
+            try {
+                if (!window.isAuthReady()) return; 
+                const { doc, getDoc } = window.firestoreImports;
+                const userId = window.getUserId();
+                const prefsRef = doc(window.db, `artifacts/${appId}/users/${userId}/teacher_ai_user_data/preferences/`);
+                const prefsSnap = await getDoc(prefsRef);
+
+                if (prefsSnap.exists() && prefsSnap.data().lastOpenedFileId) {
+                    const lastFileId = prefsSnap.data().lastOpenedFileId;
+                    
+                    const libraryDocRef = doc(window.db, `artifacts/${appId}/public/data/teacher_ai_library`, lastFileId);
+                    const fileSnap = await getDoc(libraryDocRef);
+
+                    if (fileSnap.exists()) {
+                        const data = fileSnap.data();
+                        loadDocumentIntoUI(fileSnap.id, data);
+                    }
+                }
+            } catch (error) {
+                console.error("Failed to load last opened file:", error);
+            }
+        }
+
+
+        // --- 4. Gemini API Calls (MAXIMUM Speed Focus) ---
+
+        /** Handles Translation and Analysis using Gemini (Optimized for speed/depth). */
+        window.translateAndAnalyze = async function() {
+            if (!currentDocument.name) return handleError("الرجاء رفع ملف أولاً.");
+
+            // IMPROVED LOADING MESSAGE FOR FAST UX PERCEPTION
+            const loadingMessage = `جاري الترجمة الفورية بالكامل (${currentDocument.fileSizeMB}MB)... نرجو الانتظار بضع لحظات.`;
+            showLoading(loadingMessage);
+            const retryFn = () => window.translateAndAnalyze();
+            
+            try {
+                document.getElementById('analyze-button').disabled = true;
+                
+                let parts = [];
+                // MAX SPEED SYSTEM PROMPT: Focus ONLY on full translation.
+                let systemPrompt = `أنت مترجم أكاديمي محترف. مهمتك هي **ترجمة النص الأصلي بالكامل** بدقة عالية إلى اللغة العربية الفصحى. لا تقم بالشرح أو التلخيص أو التحليل الإضافي. يجب أن يكون الناتج هو النص المُترجم كاملاً وبسرعة فائقة.`;
+
+                // Add content parts
+                if (currentDocument.base64Data) {
+                    parts.push({
+                        inlineData: {
+                            mimeType: currentDocument.mimeType,
+                            data: currentDocument.base64Data
+                        }
+                    });
+                    parts.push({ text: "قم بترجمة هذا الملف بالكامل. الأولوية للسرعة." });
+                } else {
+                    parts.push({ text: `المحتوى الأصلي: \n\n${currentDocument.originalText}` });
+                }
+
+                const payload = {
+                    contents: [{ parts: parts }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                };
+
+                const response = await geminiFetch(API_URL_FLASH, payload);
+                closeModal();
+
+                const aiText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!aiText) throw new Error("لم يتمكن المعلم الآلي من تحليل المحتوى.");
+                
+                // Update UI and state
+                currentDocument.translatedText = aiText;
+                document.getElementById('translated-content').textContent = aiText;
+                
+                // Save results to library (Asynchronous, non-blocking)
+                saveDocumentToLibrary(currentDocument);
+
+            } catch (error) {
+                handleError(`فشل في عملية الترجمة والشرح: ${error.message}`, retryFn);
+            } finally {
+                 document.getElementById('analyze-button').disabled = false;
+            }
+        }
+        
+         /** FEATURE: Summarizes the current document quickly. */
+        window.summarizeDocument = async function() {
+            if (!currentDocument.originalText) return handleError("الرجاء رفع ملف أولاً لتلخيصه.");
+
+            const loadingMessage = `جاري توليد التلخيص التنفيذي السريع (${currentDocument.fileSizeMB}MB)... يرجى الانتظار.`;
+            showLoading(loadingMessage);
+            const retryFn = () => window.summarizeDocument();
+
+            try {
+                document.getElementById('summarize-button').disabled = true;
+                
+                let parts = [];
+                // MAX SPEED SYSTEM PROMPT for summary
+                let systemPrompt = `أنت خبير في التلخيص الأكاديمي. مهمتك هي تلخيص المحتوى المقدم في 3-4 نقاط رئيسية فقط. يجب أن يكون التلخيص سريعاً جداً، مكثفاً، ومناسباً للقراءة التنفيذية (Executive Summary)، و باللغة العربية.`;
+
+                // Add content parts (using base64 for multimodal if available)
+                if (currentDocument.base64Data) {
+                    parts.push({
+                        inlineData: {
+                            mimeType: currentDocument.mimeType,
+                            data: currentDocument.base64Data
+                        }
+                    });
+                    parts.push({ text: "قم بتلخيص هذا الملف في نقاط رئيسية." });
+                } else {
+                    parts.push({ text: `المحتوى الأصلي: \n\n${currentDocument.originalText}` });
+                }
+
+                const payload = {
+                    contents: [{ parts: parts }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                };
+
+                const response = await geminiFetch(API_URL_FLASH, payload);
+                closeModal();
+
+                const aiText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!aiText) throw new Error("لم يتمكن المعلم الآلي من توليد التلخيص.");
+                
+                // Display summary in the translated content pane
+                const summaryHtml = `
+                    <h3 class="text-lg font-bold text-orange-700 border-b pb-2 mb-2">✨ التلخيص التنفيذي السريع ✨</h3>
+                    <pre class="whitespace-pre-wrap text-sm text-gray-800 mt-2 text-left-ar">${aiText}</pre>
+                `;
+                document.getElementById('translated-content').innerHTML = summaryHtml;
+                
+            } catch (error) {
+                handleError(`فشل في عملية التلخيص السريع: ${error.message}`, retryFn);
+            } finally {
+                 document.getElementById('summarize-button').disabled = false;
+            }
+        }
+
+
+        /** NEW: Triggers the extraction of concepts from the current document and displays them in the sidebar. */
+        window.extractConceptsToSidebar = async function() {
+             if (!currentDocument.originalText) return handleError("يجب رفع وتحميل ملف أولاً لاستخراج المفاهيم.");
+
+            const loadingMessage = `جاري استخراج القوانين والمفاهيم (${currentDocument.fileSizeMB}MB)... يرجى الانتظار بضع لحظات.`;
+            showLoading(loadingMessage);
+            const retryFn = () => window.extractConceptsToSidebar();
+
+            try {
+                document.getElementById('extract-concepts-button').disabled = true;
+
+                // --- CRITICAL: AI is now asked to output a structured JSON for easy parsing ---
+                let parts = [];
+                let systemPrompt = `أنت محلل أكاديمي خبير. مهمتك هي استخراج البيانات الأكاديمية بدقة عالية من المحتوى المقدم.
+                1. استخرج أهم 10 كلمات مفتاحية (Keywords) باللغة العربية.
+                2. استخرج جميع القوانين الرياضية أو الفيزيائية المذكورة (إن وجدت)، مع كتابتها في صيغة LaTeX.
+                3. يجب أن يكون الناتج النهائي عبارة عن كائن JSON بالصيغة التالية:
+                {
+                    "keywords": [ "كلمة مفتاحية 1", "كلمة مفتاحية 2", ...],
+                    "laws": [ "قانون 1 بصيغة LaTeX", "قانون 2 بصيغة LaTeX", ...]
+                }`;
+
+                if (currentDocument.base64Data) {
+                    parts.push({
+                        inlineData: { mimeType: currentDocument.mimeType, data: currentDocument.base64Data }
+                    });
+                    parts.push({ text: "قم باستخراج المفاهيم والقوانين من هذا الملف." });
+                } else {
+                    parts.push({ text: `المحتوى الأصلي: \n\n${currentDocument.originalText}` });
+                }
+
+                const payload = {
+                    contents: [{ parts: parts }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] },
+                    generationConfig: {
+                        responseMimeType: "application/json",
+                        responseSchema: {
+                            type: "OBJECT",
+                            properties: {
+                                "keywords": { "type": "ARRAY", "items": { "type": "STRING" } },
+                                "laws": { "type": "ARRAY", "items": { "type": "STRING" } }
+                            }
+                        }
+                    }
+                };
+
+                const response = await geminiFetch(API_URL_FLASH, payload);
+                closeModal();
+
+                const jsonText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!jsonText) throw new Error("لم يتمكن المعلم الآلي من استخراج البيانات.");
+                
+                const result = JSON.parse(jsonText);
+                
+                // Update state and display sidebar
+                const keywords = Array.isArray(result.keywords) ? result.keywords : [];
+                const laws = Array.isArray(result.laws) ? result.laws : [];
+                
+                displayKeyConcepts(keywords, laws);
+                
+                // Update the saved document in the Library immediately after successful extraction (async)
+                if (currentDocument.id) {
+                    const { doc, updateDoc } = window.firestoreImports;
+                    const docRef = doc(window.db, `artifacts/${appId}/public/data/teacher_ai_library`, currentDocument.id);
+                    await updateDoc(docRef, { keyConcepts: { keywords, laws } });
+                }
+
+            } catch (error) {
+                handleError(`فشل استخراج المفاهيم: ${error.message}`, retryFn);
+            } finally {
+                 document.getElementById('extract-concepts-button').disabled = false;
+            }
+        }
+
+        /** NEW: Searches the smart library (web) for a book/topic and loads it as a document. */
+        window.searchSmartLibrary = async function() {
+            const input = document.getElementById('library-search-input');
+            const queryText = input.value.trim();
+            if (!queryText) return;
+
+            const loadingMessage = `جاري البحث عن "${queryText}" واستخلاص المحتوى الأكاديمي...`;
+            showLoading(loadingMessage);
+            const retryFn = () => window.searchSmartLibrary();
+            document.getElementById('library-search-button').disabled = true;
+
+            try {
+                // Use Gemini to perform a grounded search and extract the full content
+                const systemPrompt = `أنت خبير في المكتبات الرقمية. بناءً على استعلام البحث، قم بإجراء بحث معمق واستخرج المحتوى الكامل (مثل الفصول أو النقاط الرئيسية) للكتاب أو الموضوع المطلوب. قم بتقديم الناتج في شكل نص إنجليزي واضح ومفصل ومناسب للمعالجة اللاحقة.`;
+                
+                const payload = {
+                    contents: [{ parts: [{ text: `Search for the full content/detailed summary of the academic book or document titled: "${queryText}". Output the extracted content in English.` }] }],
+                    tools: [{ "google_search": {} }],
+                    systemInstruction: { parts: [{ text: systemPrompt }] }
+                };
+
+                const response = await geminiFetch(API_URL_FLASH, payload);
+                closeModal();
+
+                const aiText = response.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (!aiText) throw new Error("لم يتم العثور على محتوى الكتاب أو الموضوع المطلوب.");
+
+                // Load the search result as a new document
+                currentDocument = {
+                    id: Date.now().toString(),
+                    name: `بحث: ${queryText}`,
+                    fileSizeMB: (aiText.length / 1024).toFixed(2), 
+                    originalText: aiText,
+                    translatedText: null,
+                    base64Data: null, 
+                    mimeType: 'text/plain',
+                    keyConcepts: { keywords: [], laws: [] }
+                };
+
+                // Update UI to show the new document
+                document.getElementById('file-name-display').textContent = `الملف المفتوح: ${currentDocument.name} (${currentDocument.fileSizeMB}KB)`;
+                document.getElementById('original-content').textContent = currentDocument.originalText;
+                document.getElementById('original-lang').textContent = 'الإنجليزية/الأصل';
+                document.getElementById('translated-content').textContent = 'تم استخلاص المحتوى بنجاح. عد إلى "الوثيقة والمعلم الآلي" لترجمته.';
+                
+                displayKeyConcepts([], []); // Clear old concepts
+
+                // Enable document processing buttons
+                document.getElementById('analyze-button').disabled = false;
+                document.getElementById('summarize-button').disabled = false;
+                document.getElementById('extract-concepts-button').disabled = false;
+
+                // Display a summary of the action in the search results pane
+                document.getElementById('library-search-results').innerHTML = `
+                    <div class="bg-green-100 p-4 rounded-lg border border-green-300">
+                        <p class="text-green-800 font-bold mb-2">تم العثور على الكتاب!</p>
+                        <p class="text-green-700">تم تحميل محتوى الكتاب بنجاح. يرجى التوجه إلى تبويب **"الوثيقة والمعلم الآلي"** لبدء الترجمة أو التلخيص.</p>
+                        <p class="text-xs text-gray-600 mt-2">حجم المحتوى: ${currentDocument.fileSizeMB}KB</p>
+                    </div>
+                `;
+
+                // Switch to document tab automatically after search
+                changeTab('document');
+
+
+            } catch (error) {
+                handleError(`فشل البحث في المكتبة: ${error.message}`, retryFn);
+                document.getElementById('library-search-results').innerHTML = `
+                    <div class="bg-red-100 p-4 rounded-lg border border-red-300">
+                        <p class="text-red-800 font-bold mb-2">عفواً، حدث خطأ في البحث!</p>
+                        <p class="text-red-700">فشل المعلم الآلي في العثور على محتوى الكتاب: ${error.message}</p>
+                    </div>
+                `;
+            } finally {
+                document.getElementById('library-search-button').disabled = false;
+            }
+        }
+
+
+        // --- 5. AI Chat Functionality (MAXIMUM Speed Focus) ---
+
+        /** Sends message to AI Chat and updates UI. */
+        window.sendAIChatMessage = async function() {
+            const input = document.getElementById('ai-chat-input');
+            const message = input.value.trim();
+            if (!message) return;
+
+            input.value = '';
+            document.getElementById('ai-send-button').disabled = true;
+
+            // Add user message to UI and history
+            appendAIChatMessage(message, 'user');
+            
+            // Only keep the last 5 exchanges in history (10 messages) to maintain performance/speed
+            aiChatHistory.push({ role: "user", parts: [{ text: message }] });
+            if (aiChatHistory.length > 10) { 
+                aiChatHistory = aiChatHistory.slice(-10);
+            }
+            
+            // Show loading placeholder immediately with Deep Thinking message
+            const placeholderId = `loading-${Date.now()}`;
+            // Faster loading message
+            appendAIChatMessage('جاري الرد السريع والدقيق جداً...', 'ai', placeholderId);
+            scrollToBottom('ai-chat-messages');
+
+            try {
+                // Pass the limited history to the API for quick response with context
+                const payload = {
+                    contents: aiChatHistory,
+                    tools: [{ "google_search": {} }], 
+                    systemInstruction: { parts: [{ text: "أنت معلم آلي متقدم، مهمتك هي الإجابة على أسئلة الطلاب الأكاديمية باللغة العربية الفصحى. الأولوية القصوى هي **السرعة المطلقة** في الرد، يليه الدقة الأكاديمية. أجب بشكل مباشر ودقيق." }] }
+                };
+
+                const response = await geminiFetch(API_URL_FLASH, payload);
+
+                // Remove loading placeholder
+                const loadingEl = document.getElementById(placeholderId);
+                if (loadingEl) loadingEl.remove();
+
+                const aiText = response.candidates?.[0]?.content?.parts?.[0]?.text || "عفواً، لم أتمكن من إيجاد إجابة وافية بسرعة. يرجى إعادة المحاولة.";
+                
+                // Update history and UI
+                aiChatHistory.push({ role: "model", parts: [{ text: aiText }] });
+                
+                appendAIChatMessage(aiText, 'ai');
+
+            } catch (error) {
+                const loadingEl = document.getElementById(placeholderId);
+                if (loadingEl) loadingEl.remove();
+                // Specific error message in the chat box itself
+                appendAIChatMessage(`حدث خطأ في الاتصال بالمعلم الآلي: ${error.message}. يرجى المحاولة مرة أخرى.`, 'error');
+                console.error("AI Chat Error:", error);
+            } finally {
+                document.getElementById('ai-send-button').disabled = false;
+                scrollToBottom('ai-chat-messages');
+                input.focus();
+            }
+        }
+
+        /** Helper function to append messages to AI Chat UI. */
+        function appendAIChatMessage(text, role, id = null) {
+            const container = document.getElementById('ai-chat-messages');
+            const isUser = role === 'user';
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex ${isUser ? 'justify-end' : 'justify-start'}`;
+            if (id) messageDiv.id = id;
+
+            const bubble = document.createElement('div');
+            bubble.className = `p-3 rounded-xl max-w-[80%] shadow-md text-sm whitespace-pre-wrap ${isUser ? 'bg-blue-600 text-white rounded-bl-none' : 'bg-gray-200 text-gray-800 rounded-br-none'}`;
+            
+            if (!isUser) {
+                const roleEl = document.createElement('p');
+                roleEl.className = 'font-bold text-blue-800 mb-1';
+                roleEl.textContent = role === 'error' ? 'خطأ:' : 'المعلم الآلي:';
+                if (role !== 'error') bubble.appendChild(roleEl);
+            }
+
+            const textNode = document.createElement('p');
+            textNode.textContent = text;
+            bubble.appendChild(textNode);
+            
+            messageDiv.appendChild(bubble);
+            container.appendChild(messageDiv);
+            scrollToBottom('ai-chat-messages');
+        }
+
+
+        // --- 6. Firestore Listeners and Data Management ---
+
+        /** Sets up all required Firestore listeners. */
+        function startFirestoreListeners(userId) {
+            setupGroupChatListener();
+            setupLibraryListener();
+        }
+
+        /** Sets up real-time listener for Group Chat messages (More frequent update). */
+        function setupGroupChatListener() {
+            if (!window.isAuthReady()) return; 
+            const { collection, query, onSnapshot } = window.firestoreImports;
+            // Query without orderBy for potential speed optimization, sorting client-side
+            const chatQuery = query(collection(window.db, `artifacts/${appId}/public/data/teacher_ai_group_chat`)); 
+            
+            onSnapshot(chatQuery, (snapshot) => {
+                const messages = [];
+                snapshot.docs.forEach(doc => {
+                    messages.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // Sort client-side by timestamp to keep order correct
+                messages.sort((a, b) => (a.timestamp?.toMillis() || 0) - (b.timestamp?.toMillis() || 0));
+
+                displayGroupChatMessages(messages);
+            }, (error) => {
+                console.error("Group Chat Listener Error:", error);
+                document.getElementById('group-chat-messages').innerHTML = `<p class="text-center text-red-500">فشل تحميل الرسائل الجماعية.</p>`;
+            });
+        }
+        
+        /** Displays group chat messages in the sidebar. */
+        function displayGroupChatMessages(messages) {
+            const container = document.getElementById('group-chat-messages');
+            container.innerHTML = ''; // Clear messages before redrawing
+            
+            if (messages.length === 0) {
+                container.innerHTML = `<p class="text-center text-gray-500 pt-2">لا توجد رسائل بعد. كن أول من يبدأ النقاش!</p>`;
+                return;
+            }
+
+            messages.forEach(msg => {
+                const isMine = msg.userId === window.getUserId();
+                const time = msg.timestamp?.toDate ? msg.timestamp.toDate().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' }) : 'الآن';
+
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `flex ${isMine ? 'justify-end' : 'justify-start'}`;
+
+                const bubble = document.createElement('div');
+                bubble.className = `p-2 rounded-xl max-w-[90%] shadow-sm text-xs ${isMine ? 'bg-blue-100 rounded-bl-lg' : 'bg-gray-100 rounded-br-lg'}`;
+                
+                const userEl = document.createElement('p');
+                userEl.className = `font-bold mb-1 ${isMine ? 'text-blue-700' : 'text-gray-700'}`;
+                userEl.textContent = isMine ? 'أنت' : `المستخدم: ${msg.userId.substring(0, 8)}...`;
+                bubble.appendChild(userEl);
+
+                const textEl = document.createElement('p');
+                textEl.textContent = msg.message;
+                bubble.appendChild(textEl);
+
+                const timeEl = document.createElement('span');
+                timeEl.className = 'block text-left-ar mt-1 text-[10px] text-gray-500';
+                timeEl.textContent = time;
+                bubble.appendChild(timeEl);
+
+                messageDiv.appendChild(bubble);
+                container.appendChild(messageDiv);
+            });
+            scrollToBottom('group-chat-messages');
+        }
+
+        /** Sends a message to the public group chat. */
+        window.sendGroupChatMessage = async function() {
+            const input = document.getElementById('group-chat-input');
+            const message = input.value.trim();
+            if (!message || !window.isAuthReady()) return; 
+
+            input.value = '';
+            input.disabled = true;
+
+            try {
+                const { addDoc, collection, serverTimestamp } = window.firestoreImports;
+                const chatRef = collection(window.db, `artifacts/${appId}/public/data/teacher_ai_group_chat`);
+
+                await addDoc(chatRef, {
+                    message: message,
+                    userId: window.getUserId(),
+                    timestamp: serverTimestamp()
+                });
+            } catch (error) {
+                handleError(`فشل إرسال الرسالة الجماعية: ${error.message}`);
+            } finally {
+                input.disabled = false;
+                input.focus();
+            }
+        }
+
+        /** Sets up real-time listener for the Smart Library. */
+        function setupLibraryListener() {
+            if (!window.isAuthReady()) return; 
+            const { collection, query, orderBy, onSnapshot } = window.firestoreImports;
+            const libraryQuery = query(collection(window.db, `artifacts/${appId}/public/data/teacher_ai_library`), orderBy("timestamp", "desc"));
+
+            onSnapshot(libraryQuery, (snapshot) => {
+                const documents = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                displayLibraryDocuments(documents);
+            }, (error) => {
+                console.error("Library Listener Error:", error);
+                document.getElementById('library-loading').textContent = 'فشل تحميل المكتبة.';
+            });
+        }
+        
+        /** Displays library documents in the sidebar. */
+        function displayLibraryDocuments(documents) {
+            const container = document.getElementById('library-list');
+            const loadingMsg = document.getElementById('library-loading');
+            container.innerHTML = '';
+            loadingMsg.classList.add('hidden');
+            
+            if (documents.length === 0) {
+                loadingMsg.textContent = 'المكتبة فارغة. ابدأ برفع ملفك الأول!';
+                loadingMsg.classList.remove('hidden');
+                return;
+            }
+
+            documents.forEach(docData => {
+                const item = document.createElement('div');
+                item.className = 'flex justify-between items-center p-2 bg-white rounded-lg border border-gray-100 shadow-sm cursor-pointer hover:bg-blue-50 transition';
+                item.setAttribute('onclick', `openLibraryDocument('${docData.id}')`);
+
+                const text = document.createElement('span');
+                text.className = 'truncate text-gray-700 text-sm';
+                text.textContent = docData.name;
+                item.appendChild(text);
+
+                const icon = document.createElement('span');
+                icon.className = 'text-blue-500 text-xs font-bold';
+                icon.textContent = docData.mimeType.includes('image') ? 'صورة' : docData.mimeType.includes('pdf') ? 'PDF' : 'نص';
+                item.appendChild(icon);
+
+                container.appendChild(item);
+            });
+        }
+
+        /** Opens a document from the library and updates the main view. */
+        window.openLibraryDocument = function(docId) {
+            showLoading("جاري تحميل الملف من المكتبة...");
+            
+            try {
+                const { doc, getDoc } = window.firestoreImports;
+                const docRef = doc(window.db, `artifacts/${appId}/public/data/teacher_ai_library`, docId);
+                
+                getDoc(docRef).then(snap => {
+                    if (snap.exists()) {
+                        const data = snap.data();
+                        loadDocumentIntoUI(snap.id, data);
+                        // Update Key Concepts from saved data
+                        displayKeyConcepts(data.keyConcepts?.keywords, data.keyConcepts?.laws);
+                        closeModal();
+                        saveLastOpenedFile(snap.id);
+                    } else {
+                        throw new Error("لم يتم العثور على الملف في المكتبة.");
+                    }
+                }).catch(error => handleError(`فشل فتح ملف المكتبة: ${error.message}`));
+
+            } catch (error) {
+                handleError(`فشل فتح ملف المكتبة: ${error.message}`);
+            }
+        }
+
+        /** Loads document data into the main UI view. */
+        function loadDocumentIntoUI(id, data) {
+            currentDocument.id = id;
+            currentDocument.name = data.name;
+            currentDocument.fileSizeMB = data.fileSizeMB || 0; 
+            currentDocument.originalText = data.originalText;
+            currentDocument.translatedText = data.translatedText;
+            currentDocument.keyConcepts = data.keyConcepts || { keywords: [], laws: [] };
+            currentDocument.mimeType = data.mimeType || 'text/plain';
+            
+            document.getElementById('file-name-display').textContent = `الملف المفتوح: ${data.name} (${currentDocument.fileSizeMB}MB)`;
+            document.getElementById('original-content').textContent = currentDocument.originalText || 'لا يوجد نص أصلي.';
+            document.getElementById('original-lang').textContent = 'الإنجليزية/الأصل';
+            document.getElementById('translated-content').textContent = currentDocument.translatedText || 'لم يتم توليد ترجمة فورية بعد.';
+            
+            // Ensure buttons reflect state
+            const buttonsDisabled = !currentDocument.originalText;
+            document.getElementById('analyze-button').disabled = buttonsDisabled;
+            document.getElementById('summarize-button').disabled = buttonsDisabled;
+            document.getElementById('extract-concepts-button').disabled = buttonsDisabled;
+            
+            // Display concepts from loaded data
+            displayKeyConcepts(currentDocument.keyConcepts.keywords, currentDocument.keyConcepts.laws); 
+
+            changeTab('document');
+        }
+
+        /** Displays extracted key concepts and laws in the sidebar. */
+        function displayKeyConcepts(keywords, laws) {
+            const safeKeywords = Array.isArray(keywords) ? keywords : [];
+            const safeLaws = Array.isArray(laws) ? laws : [];
+            
+            const container = document.getElementById('key-concepts-display');
+            container.innerHTML = '';
+
+            const keywordList = safeKeywords.map(k => `<span class="inline-block bg-blue-200 text-blue-800 text-xs px-3 py-1 rounded-full font-medium shadow-sm">${k}</span>`).join(' ');
+            
+            let lawsHtml = '';
+            if (safeLaws.length > 0) {
+                lawsHtml = `
+                    <h4 class="font-bold mt-4 mb-2 text-blue-700">القوانين (صيغة LaTeX):</h4>
+                    <div class="space-y-2">
+                        ${safeLaws.map(l => `<div class="p-2 bg-white border border-blue-100 rounded-lg text-xs font-mono text-gray-800 overflow-x-auto">$$${l}$$</div>`).join('')}
+                    </div>
+                `;
+            } else {
+                lawsHtml = '<p class="text-sm text-gray-500 mt-2">لم يتم استخراج قوانين رياضية أو فيزيائية.</p>';
+            }
+
+            container.innerHTML = `
+                <h4 class="font-bold mb-2 text-blue-700">الكلمات المفتاحية:</h4>
+                <div class="flex flex-wrap gap-2">${keywordList || '<p class="text-sm text-gray-500">لا توجد كلمات مفتاحية مستخلصة.</p>'}</div>
+                ${lawsHtml}
+            `;
+
+            // Update global state
+            currentDocument.keyConcepts.keywords = safeKeywords;
+            currentDocument.keyConcepts.laws = safeLaws;
+        }
+
+        /** Scrolls the given element to the bottom. */
+        function scrollToBottom(elementId) {
+            const element = document.getElementById(elementId);
+            element.scrollTop = element.scrollHeight;
+        }
+
+        // --- Initial Setup on Window Load ---
+        window.onload = function() {
+            document.getElementById('access-key-input').focus();
+            changeTab('document');
+            document.body.style.fontFamily = "'Cairo', sans-serif";
+            
+            if (!window.isAuthReady()) { 
+                 document.getElementById('library-loading').textContent = 'جاري تهيئة الاتصال بقاعدة البيانات...';
+            }
+        };
+
+    </script>
+</body>
+</html>
